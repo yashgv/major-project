@@ -1,0 +1,1 @@
+python train_s2vnet_u.py --dataset Indian --batch_size 64 --lr 5e-4 --epoches 500 --patches 5 --dropout_p 0.3 --mc_samples_train 8 --mc_samples_eval 32 --lambda_cls 1.0 --lambda_cons 0.5 --weight_decay 1e-3 --l2_reg 1e-5 --label_smoothing 0.1
