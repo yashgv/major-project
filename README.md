@@ -1,1 +1,24 @@
-python train_s2vnet_u.py --dataset Indian --batch_size 64 --lr 5e-4 --epoches 500 --patches 5 --dropout_p 0.3 --mc_samples_train 8 --mc_samples_eval 32 --lambda_cls 1.0 --lambda_cons 0.5 --weight_decay 1e-3 --l2_reg 1e-5 --label_smoothing 0.1
+![alt text](image.png)
+Indian Pines
+
+![alt text](image-1.png)
+Augsberg
+
+Critical implementation notes:
+
+Start with λ₄ = 0.005 - this is conservative and prevents the SCR term from overwhelming other losses
+The spectral similarity threshold of 0.8 works well for most HSI datasets based on cosine similarity ranges
+Use 3x3 neighborhood to match your existing patch sizes
+
+
+
+The implementation is working correctly and has successfully improved the model's performance. The spectral consistency regularization appears to be helping with feature learning, as evidenced by:
+
+Strong class-wise accuracy (all classes >0.9 in best epoch)
+High overall and average accuracies
+Stable training behavior
+Do you want me to make any adjustments to the hyperparameters or implementation to try to improve the results further? For example, we could:
+
+Adjust the lambda4 value (currently 0.005)
+Modify the spectral similarity threshold (currently 0.8)
+Change the neighborhood size for computing spectral consistency

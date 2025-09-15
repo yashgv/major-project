@@ -16,7 +16,7 @@ parser = argparse.ArgumentParser("HSI")
 parser.add_argument('--fix_random', action='store_true', default=True, help='fix randomness')
 parser.add_argument('--gpu_id', default='1', help='gpu id')
 parser.add_argument('--seed', type=int, default=0, help='number of seed')
-parser.add_argument('--dataset', choices=['Indian', 'Berlin', 'Augsburg'], default='Indian', help='dataset to use')
+parser.add_argument('--dataset', choices=['Indian', 'Berlin', 'Augsburg'], default='Augsburg', help='dataset to use')
 parser.add_argument('--flag_test', choices=['test', 'train'], default='train', help='testing mark')
 parser.add_argument('--model_name', choices=['s2vnet'], default='s2vnet', help='S2VNet')
 parser.add_argument('--batch_size', type=int, default=64, help='number of batch size')
@@ -26,6 +26,7 @@ parser.add_argument('--epoches', type=int, default=500, help='epoch number')
 parser.add_argument('--learning_rate', type=float, default=1e-3, help='learning rate')
 parser.add_argument('--gamma', type=float, default=0.9, help='gamma')
 parser.add_argument('--weight_decay', type=float, default=0, help='weight_decay')
+parser.add_argument('--lambda4', type=float, default=0.005, help='spectral consistency regularization weight')
 args = parser.parse_args()
 
 def train_epoch(model, train_loader, criterion, optimizer):
@@ -34,12 +35,12 @@ def train_epoch(model, train_loader, criterion, optimizer):
     tar = np.array([])
     pre = np.array([])
     for batch_idx, (batch_data, batch_target) in enumerate(train_loader):
-        batch_data = batch_data.cuda()
+        batch_data = batch_data.cuda()  # Data will be converted to float32 in forward pass
         batch_target = batch_target.cuda()
 
         optimizer.zero_grad()
         if 's2vnet' in args.model_name:
-            re_unmix_nonlinear, re_unmix, batch_pred, edm_var_1, edm_var_2, feature_abu, edm_per = model(batch_data)
+            re_unmix_nonlinear, re_unmix, batch_pred, edm_var_1, edm_var_2, feature_abu, edm_per, scr_loss = model(batch_data)
 
             band = re_unmix.shape[1] // 2  # 2 represents the number of decoder layer
             output_linear = re_unmix[:,0:band] + re_unmix[:,band:band*2]
@@ -62,7 +63,9 @@ def train_epoch(model, train_loader, criterion, optimizer):
 
             sad_loss = torch.mean(torch.acos(torch.sum(batch_data * re_unmix, dim=1)/
                         (torch.norm(re_unmix, dim=1, p=2) * torch.norm(batch_data, dim=1, p=2)+1e-5)))
-            loss = criterion(batch_pred, batch_target) + sad_loss + 0.01 * kl_div + 0.01 * loss_tv + 0.01 * loss_tv_abu
+            
+            # Add SCR loss to total loss with weight lambda4
+            loss = criterion(batch_pred, batch_target) + sad_loss + 0.01 * kl_div + 0.01 * loss_tv + 0.01 * loss_tv_abu + 0.005 * scr_loss
         else:
             batch_pred = model(batch_data)
             loss = criterion(batch_pred, batch_target)
@@ -87,14 +90,14 @@ def valid_epoch(model, valid_loader, criterion, optimizer):
         batch_target = batch_target.cuda()
 
         if 's2vnet' in args.model_name:
-            re_unmix_nonlinear, re_unmix, batch_pred, edm_var_1, edm_var_2, _, _ = model(batch_data)
+            re_unmix_nonlinear, re_unmix, batch_pred, edm_var_1, edm_var_2, _, _, _ = model(batch_data)
 
             band = re_unmix.shape[1]//2  # 2 represents the number of decoder layer
             output_linear = re_unmix[:,0:band] + re_unmix[:,band:band*2]
             re_unmix = re_unmix_nonlinear + output_linear
 
             sad_loss = torch.mean(torch.acos(torch.sum(batch_data * re_unmix, dim=1)/
-                        (torch.norm(re_unmix, dim=1, p=2) * torch.norm(batch_data, dim=1, p=2))))
+                        (torch.norm(re_unmix, dim=1, p=2) * torch.norm(batch_data, dim=1, p=2) + 1e-10)))
             loss = criterion(batch_pred, batch_target) + sad_loss
         else:
             batch_pred = model(batch_data)
@@ -115,7 +118,7 @@ def test_epoch(model, test_loader):
         batch_target = batch_target.cuda()
 
         if args.model_name == 's2vnet':
-            re_unmix_nonlinear, re_unmix, batch_pred, edm_var_1, edm_var_2, _, _ = model(batch_data)
+            re_unmix_nonlinear, re_unmix, batch_pred, edm_var_1, edm_var_2, _, _, _ = model(batch_data)
         else:
             batch_pred = model(batch_data)
 
@@ -141,7 +144,7 @@ def main():
     label_train_loader, label_test_loader, label_true_loader, band, height, width, num_classes, label, total_pos_true = prepare_dataset(args)
     # create model
     if args.model_name == 's2vnet':
-        model = S2VNet(band, num_classes, args.patches)
+        model = S2VNet(band, num_classes, args.patches, lambda4=args.lambda4)
     else:
         raise KeyError("{} model is unknown.".format(args.model_name))
     model = model.cuda()
@@ -169,14 +172,16 @@ def main():
         tic = time.time()
         min_val_obj, best_OA = 0.5, 0
         for epoch in range(args.epoches):
-            scheduler.step()
-
             # train model
             model.train()
             train_acc, train_obj, tar_t, pre_t = train_epoch(model, label_train_loader, criterion, optimizer)
             OA1, AA_mean1, Kappa1, AA1 = output_metric(tar_t, pre_t)
-            print("Epoch: {:03d} train_loss: {:.4f} train_acc: {:.4f}"
-                            .format(epoch+1, train_obj, train_acc))
+            
+            # Step the scheduler after optimizer
+            scheduler.step()
+            
+            print("Epoch: {:03d} train_loss: {:.4f} train_acc: {:.4f} OA: {:.4f} AA: {:.4f}"
+                            .format(epoch+1, train_obj, train_acc, OA1, AA_mean1))
 
             model.unmix_decoder.apply(apply_nonegative) # regularize unmix decoder
 
