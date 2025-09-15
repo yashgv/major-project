@@ -21,7 +21,7 @@ parser.add_argument('--flag_test', choices=['test', 'train'], default='train', h
 parser.add_argument('--model_name', choices=['s2vnet'], default='s2vnet', help='S2VNet')
 parser.add_argument('--batch_size', type=int, default=64, help='number of batch size')
 parser.add_argument('--test_freq', type=int, default=5, help='number of evaluation')
-parser.add_argument('--patches', type=int, default=7, help='number of patches')
+parser.add_argument('--patches', type=int, default=5, help='number of patches')
 parser.add_argument('--epoches', type=int, default=500, help='epoch number')
 parser.add_argument('--learning_rate', type=float, default=1e-3, help='learning rate')
 parser.add_argument('--gamma', type=float, default=0.9, help='gamma')
