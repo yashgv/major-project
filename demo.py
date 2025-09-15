@@ -6,6 +6,7 @@ import torch.backends.cudnn as cudnn
 from scipy.io import savemat
 from torch import optim
 from model import S2VNet
+from model_ca import S2VNet_CA
 from utils import AvgrageMeter, accuracy, output_metric, NonZeroClipper, print_args
 from dataset import prepare_dataset
 import numpy as np
@@ -18,7 +19,7 @@ parser.add_argument('--gpu_id', default='1', help='gpu id')
 parser.add_argument('--seed', type=int, default=0, help='number of seed')
 parser.add_argument('--dataset', choices=['Indian', 'Berlin', 'Augsburg'], default='Indian', help='dataset to use')
 parser.add_argument('--flag_test', choices=['test', 'train'], default='train', help='testing mark')
-parser.add_argument('--model_name', choices=['s2vnet'], default='s2vnet', help='S2VNet')
+parser.add_argument('--model_name', choices=['s2vnet', 's2vnet_ca'], default='s2vnet', help='S2VNet or S2VNet with Cross Attention')
 parser.add_argument('--batch_size', type=int, default=64, help='number of batch size')
 parser.add_argument('--test_freq', type=int, default=5, help='number of evaluation')
 parser.add_argument('--patches', type=int, default=7, help='number of patches')
@@ -27,6 +28,12 @@ parser.add_argument('--learning_rate', type=float, default=1e-3, help='learning 
 parser.add_argument('--gamma', type=float, default=0.9, help='gamma')
 parser.add_argument('--weight_decay', type=float, default=0, help='weight_decay')
 args = parser.parse_args()
+
+# Set up GPU
+if torch.cuda.is_available():
+    torch.cuda.set_device(int(args.gpu_id))
+    cudnn.benchmark = True
+    cudnn.enabled = True
 
 def train_epoch(model, train_loader, criterion, optimizer):
     objs = AvgrageMeter()
@@ -38,16 +45,17 @@ def train_epoch(model, train_loader, criterion, optimizer):
         batch_target = batch_target.cuda()
 
         optimizer.zero_grad()
-        if 's2vnet' in args.model_name:
+        if args.model_name == 's2vnet':
             re_unmix_nonlinear, re_unmix, batch_pred, edm_var_1, edm_var_2, feature_abu, edm_per = model(batch_data)
-
-            band = re_unmix.shape[1] // 2  # 2 represents the number of decoder layer
-            output_linear = re_unmix[:,0:band] + re_unmix[:,band:band*2]
-            re_unmix = re_unmix_nonlinear + output_linear
-
-            # compute kl loss
             kl_div = -0.5 * (edm_var_2 + 1 - edm_var_1 ** 2 - edm_var_2.exp())
             kl_div = kl_div.sum() / batch_pred.shape[0]
+            ca_reg_loss = 0
+        elif args.model_name == 's2vnet_ca':
+            re_unmix_nonlinear, re_unmix, batch_pred, edm_var_1, edm_var_2, feature_abu, edm_per, enhanced_spectral = model(batch_data)
+            kl_div = -0.5 * (edm_var_2 + 1 - edm_var_1 ** 2 - edm_var_2.exp())
+            kl_div = kl_div.sum() / batch_pred.shape[0]
+            # Compute cross attention regularization loss
+            ca_reg_loss = model.compute_attention_regularization_loss(enhanced_spectral, feature_abu)
             kl_div = torch.max(kl_div, torch.tensor(0).cuda())
 
             # compute tv loss
@@ -60,9 +68,29 @@ def train_epoch(model, train_loader, criterion, optimizer):
             w_tv = torch.pow((feature_abu[:, :, :, 1:] - feature_abu[:, :, :, :w_x - 1]), 2).sum()
             loss_tv_abu = (h_tv + w_tv) / (b_x * 2 * h_x * w_x)  # abundance tv_loss
 
-            sad_loss = torch.mean(torch.acos(torch.sum(batch_data * re_unmix, dim=1)/
-                        (torch.norm(re_unmix, dim=1, p=2) * torch.norm(batch_data, dim=1, p=2)+1e-5)))
-            loss = criterion(batch_pred, batch_target) + sad_loss + 0.01 * kl_div + 0.01 * loss_tv + 0.01 * loss_tv_abu
+            # Compute SAD loss between input and reconstruction
+            input_flat = batch_data.view(batch_data.size(0), batch_data.size(1), -1)  # [B, C, HW]
+            
+            # Split re_unmix into two parts and use the first part for SAD loss
+            band = re_unmix.shape[1] // 2
+            re_unmix_1 = re_unmix[:, :band]
+            recon_flat = re_unmix_1.view(re_unmix_1.size(0), re_unmix_1.size(1), -1)  # [B, C, HW]
+            
+            # Compute cosine similarity along channel dimension for each spatial location
+            dot_product = torch.sum(input_flat * recon_flat, dim=1)  # [B, HW]
+            input_norm = torch.norm(input_flat, dim=1)  # [B, HW]
+            recon_norm = torch.norm(recon_flat, dim=1)  # [B, HW]
+            
+            cos_sim = dot_product / (input_norm * recon_norm + 1e-8)
+            cos_sim = torch.clamp(cos_sim, min=-1.0, max=1.0)  # Ensure numerical stability
+            sad_loss = torch.mean(torch.acos(cos_sim))
+            # Add cross attention regularization loss for S2VNet-CA
+            if args.model_name == 's2vnet_ca':
+                loss = criterion(batch_pred, batch_target) + sad_loss + 0.01 * kl_div + \
+                       0.01 * loss_tv + 0.01 * loss_tv_abu + model.lambda5 * ca_reg_loss
+            else:
+                loss = criterion(batch_pred, batch_target) + sad_loss + 0.01 * kl_div + \
+                       0.01 * loss_tv + 0.01 * loss_tv_abu
         else:
             batch_pred = model(batch_data)
             loss = criterion(batch_pred, batch_target)
@@ -86,8 +114,10 @@ def valid_epoch(model, valid_loader, criterion, optimizer):
         batch_data = batch_data.cuda()
         batch_target = batch_target.cuda()
 
-        if 's2vnet' in args.model_name:
+        if args.model_name == 's2vnet':
             re_unmix_nonlinear, re_unmix, batch_pred, edm_var_1, edm_var_2, _, _ = model(batch_data)
+        elif args.model_name == 's2vnet_ca':
+            re_unmix_nonlinear, re_unmix, batch_pred, edm_var_1, edm_var_2, _, _, _ = model(batch_data)
 
             band = re_unmix.shape[1]//2  # 2 represents the number of decoder layer
             output_linear = re_unmix[:,0:band] + re_unmix[:,band:band*2]
@@ -140,10 +170,13 @@ def main():
     ## prepare dataset
     label_train_loader, label_test_loader, label_true_loader, band, height, width, num_classes, label, total_pos_true = prepare_dataset(args)
     # create model
+    # Create model based on model_name
     if args.model_name == 's2vnet':
         model = S2VNet(band, num_classes, args.patches)
+    elif args.model_name == 's2vnet_ca':
+        model = S2VNet_CA(band, num_classes, args.patches)
     else:
-        raise KeyError("{} model is unknown.".format(args.model_name))
+        raise ValueError(f"Unknown model name: {args.model_name}")
     model = model.cuda()
     print("Model Name: {}".format(args.model_name))
 
