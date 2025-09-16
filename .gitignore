@@ -3,3 +3,4 @@
 /venv
 /checkpoints
 /results
+/data/*
