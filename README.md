@@ -23,3 +23,5 @@ The high AA (97.95%) suggests that the model performs well even on minority clas
 
 
 ![alt text](image.png)
+
+![alt text](image-1.png)
