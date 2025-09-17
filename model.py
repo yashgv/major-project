@@ -72,17 +72,23 @@ class S2VNet(nn.Module):
             nn.BatchNorm1d(num_classes),
             nn.ReLU(),
         )
-        # fusion module
+        # attention-based fusion module
         self.conv = nn.Sequential(
             nn.Conv2d(num_classes, num_classes, kernel_size=3, stride=2, padding=0),
             nn.BatchNorm2d(num_classes),
             nn.ReLU(),
         )
-        self.feature_size = self._get_final_flattened_size()
-        self.fc = nn.Linear(self.feature_size, num_classes)
-
-        self.fc_2 = nn.Linear(num_classes*2, num_classes)
-        self.relu = nn.ReLU()
+        self.abundance_proj = nn.Linear(self._get_abundance_flattened_size(), 128)
+        self.cls_proj = nn.Linear(num_classes, 128)
+        self.cos_proj = nn.Linear(num_classes, 128)
+        self.fusion_attn = nn.MultiheadAttention(128, num_heads=4, batch_first=True)
+        self.fusion_net = nn.Sequential(
+            nn.Linear(128*3, 256),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(256, 128)
+        )
+        self.classifier = nn.Linear(128, num_classes)
 
     def _get_final_flattened_size(self):
         with torch.no_grad():
@@ -90,6 +96,13 @@ class S2VNet(nn.Module):
             x = self.conv(x)
             _, c, w, h = x.size()
             return c * w * h + self.num_classes
+
+    def _get_abundance_flattened_size(self):
+        with torch.no_grad():
+            x = torch.zeros((1, self.num_classes, self.patch_size, self.patch_size))
+            x = self.conv(x)
+            _, c, w, h = x.size()
+            return c * w * h
 
     def reparameterize(self, mu, log_var):
         std = (log_var * 0.5).exp()
@@ -157,13 +170,15 @@ class S2VNet(nn.Module):
         edm_norm = torch.norm(center_pixel)
         center_pixel_norm = torch.norm(center_pixel)
         cos_value = cos_value / (edm_norm * center_pixel_norm)
-        # fuse abu features and cls token
-        feature_fuse = torch.cat([abu_v, feature_cls], dim=1)
-        output_cls = self.fc(feature_fuse)
-        output_cls = self.relu(output_cls)
-
-        output_cls = torch.cat([output_cls, cos_value], dim=1)
-        output_cls = self.fc_2(output_cls)
+        # attention-based fusion among abundance, cls and cosine similarity
+        abu_feat = self.abundance_proj(abu_v)
+        cls_feat = self.cls_proj(feature_cls)
+        cos_feat = self.cos_proj(cos_value)
+        seq = torch.stack([abu_feat, cls_feat, cos_feat], dim=1)
+        attn_out, _ = self.fusion_attn(seq, seq, seq)
+        fused = attn_out.reshape(attn_out.shape[0], -1)
+        fused = self.fusion_net(fused)
+        output_cls = self.classifier(fused)
 
         if output_abu:
             return re_unmix_nonlinear, re_unmix, output_cls, feature_abu

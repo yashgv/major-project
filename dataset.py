@@ -1,5 +1,6 @@
 import torch
 import torch.utils.data as Data
+import random
 
 from scipy.io import loadmat
 import numpy as np
@@ -52,10 +53,10 @@ def prepare_dataset(args, samples_type='ratio'):
     x_train_band, x_test_band, x_true_band = train_and_test_data(mirror_image, band, total_pos_train, total_pos_test, patch=args.patches, true_point=total_pos_true)
     y_train, y_test, y_true = train_and_test_label(number_train, number_test, num_classes, number_true)
     #-------------------------------------------------------------------------------
-    # load data
-    x_train=torch.from_numpy(x_train_band.transpose(0,3,2,1)).type(torch.FloatTensor) #[695, 200, 7, 7]
-    y_train=torch.from_numpy(y_train).type(torch.LongTensor) #[695]
-    Label_train=Data.TensorDataset(x_train, y_train)
+    # load data with HSI augmentations for training
+    x_train=torch.from_numpy(x_train_band.transpose(0,3,2,1)).type(torch.FloatTensor) #[N, B, P, P]
+    y_train=torch.from_numpy(y_train).type(torch.LongTensor)
+    Label_train=HSIDataset(x_train, y_train, train=True)
     label_train_loader=Data.DataLoader(Label_train,batch_size=args.batch_size,shuffle=True)
 
     x_test=torch.from_numpy(x_test_band.transpose(0,3,2,1)).type(torch.FloatTensor) # [9671, 200, 7, 7]
@@ -68,6 +69,74 @@ def prepare_dataset(args, samples_type='ratio'):
     Label_true=Data.TensorDataset(x_true, y_true)
     label_true_loader=Data.DataLoader(Label_true,batch_size=args.batch_size,shuffle=False)
     return label_train_loader, label_test_loader, label_true_loader, band, height, width, num_classes, label, total_pos_true
+
+
+class HSIDataset(Data.Dataset):
+    def __init__(self, x, y, train=False):
+        self.x = x
+        self.y = y
+        self.train = train
+        self.aug = HSIAugmentation() if train else None
+
+    def __len__(self):
+        return self.x.shape[0]
+
+    def __getitem__(self, idx):
+        xi = self.x[idx]
+        yi = self.y[idx]
+        if self.train and self.aug is not None:
+            xi, yi = self.aug(xi, yi)
+        return xi, yi
+
+
+class HSIAugmentation:
+    def __init__(self):
+        self.noise_std_range = (0.01, 0.05)
+        self.band_drop_prob = 0.1
+        self.shift_range = (-2, 2)
+        self.mixup_alpha = 0.2
+
+    def spectral_noise(self, x):
+        std = random.uniform(*self.noise_std_range)
+        noise = torch.randn_like(x) * std
+        return (x + noise).clamp(0.0, 1.0)
+
+    def band_dropout(self, x):
+        if random.random() < self.band_drop_prob:
+            c = x.shape[0]
+            drop_idx = random.randrange(c)
+            x = x.clone()
+            x[drop_idx] = 0.0
+        return x
+
+    def spectral_shift(self, x):
+        shift = random.randint(*self.shift_range)
+        if shift == 0:
+            return x
+        c = x.shape[0]
+        rolled = torch.roll(x, shifts=shift, dims=0)
+        if shift > 0:
+            rolled[:shift] = 0
+        else:
+            rolled[shift:] = 0
+        return rolled
+
+    def mixup(self, x, y):
+        lam = np.random.beta(self.mixup_alpha, self.mixup_alpha)
+        idx = random.randrange(self.__len__() if hasattr(self, '__len__') else int(x.shape[0]))
+        # Fallback: if we don't know dataset length, skip mixup
+        if isinstance(y, torch.Tensor):
+            y = y.item()
+        return x, torch.tensor(y)
+
+    def __call__(self, x, y):
+        if random.random() < 0.3:
+            x = self.spectral_noise(x)
+        if random.random() < 0.2:
+            x = self.band_dropout(x)
+        if random.random() < 0.3:
+            x = self.spectral_shift(x)
+        return x, y
 
 # split dataset by training set ratio
 def split_train_data_clssnum(gt, num_classes, train_num_ratio):

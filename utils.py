@@ -1,5 +1,8 @@
 import numpy as np
 from sklearn.metrics import confusion_matrix
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 class AvgrageMeter(object):
   def __init__(self):
@@ -58,3 +61,35 @@ class NonZeroClipper(object):
         if hasattr(module, 'weight'):
            w = module.weight.data
            w.clamp_(1e-6, 1)
+
+
+class FocalLossWithSmoothing(nn.Module):
+  def __init__(self, alpha=0.25, gamma=2.0, label_smoothing=0.1, reduction='mean'):
+    super(FocalLossWithSmoothing, self).__init__()
+    self.alpha = alpha
+    self.gamma = gamma
+    self.label_smoothing = label_smoothing
+    self.reduction = reduction
+
+  def forward(self, logits, targets):
+    num_classes = logits.size(1)
+    with torch.no_grad():
+      smooth = self.label_smoothing
+      true_dist = torch.zeros_like(logits)
+      true_dist.fill_(smooth / (num_classes - 1))
+      true_dist.scatter_(1, targets.unsqueeze(1), 1.0 - smooth)
+
+    log_probs = F.log_softmax(logits, dim=1)
+    probs = log_probs.exp()
+
+    pt = (true_dist * probs).sum(dim=1)
+    focal_weight = (1 - pt).pow(self.gamma)
+    alpha_weight = torch.ones_like(pt) * self.alpha
+
+    loss = -(focal_weight * alpha_weight) * (true_dist * log_probs).sum(dim=1)
+
+    if self.reduction == 'mean':
+      return loss.mean()
+    elif self.reduction == 'sum':
+      return loss.sum()
+    return loss

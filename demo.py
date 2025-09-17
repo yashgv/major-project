@@ -6,7 +6,7 @@ import torch.backends.cudnn as cudnn
 from scipy.io import savemat
 from torch import optim
 from model import S2VNet
-from utils import AvgrageMeter, accuracy, output_metric, NonZeroClipper, print_args
+from utils import AvgrageMeter, accuracy, output_metric, NonZeroClipper, print_args, FocalLossWithSmoothing
 from dataset import prepare_dataset
 import numpy as np
 import time
@@ -14,7 +14,7 @@ import os
 
 parser = argparse.ArgumentParser("HSI")
 parser.add_argument('--fix_random', action='store_true', default=True, help='fix randomness')
-parser.add_argument('--gpu_id', default='1', help='gpu id')
+parser.add_argument('--gpu_id', default='0', help='gpu id')
 parser.add_argument('--seed', type=int, default=0, help='number of seed')
 parser.add_argument('--dataset', choices=['Indian', 'Berlin', 'Augsburg'], default='Indian', help='dataset to use')
 parser.add_argument('--flag_test', choices=['test', 'train'], default='train', help='testing mark')
@@ -148,7 +148,7 @@ def main():
     print("Model Name: {}".format(args.model_name))
 
     # criterion
-    criterion = nn.CrossEntropyLoss().cuda()
+    criterion = FocalLossWithSmoothing(alpha=0.25, gamma=2.0, label_smoothing=0.1).cuda()
     # Set the optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
 
